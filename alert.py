@@ -88,8 +88,9 @@ def load_holdings():
         'https://www.googleapis.com/auth/drive',
     ]
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
-    gc = gspread.authorize(creds)
-    ws = gc.open_by_key(SHEET_ID).get_worksheet(0)
+    gc    = gspread.authorize(creds)
+    sh    = gc.open_by_key(SHEET_ID)
+    ws    = sh.get_worksheet(0)
     all_values = ws.get_all_values()
 
     holdings = []
@@ -111,6 +112,28 @@ def load_holdings():
             'call_begin': g(17),
             'call_end':   g(18),
         })
+
+    # 주식코드 시트 로드
+    try:
+        ws_stock = sh.worksheet('주식코드')
+        stock_rows = ws_stock.get_all_values()
+        stock_map = {}   # isin → {'issuer': '002320', 'target': '002320'}
+        for row in stock_rows[1:]:
+            if len(row) >= 5 and row[1].strip():
+                stock_map[row[1].strip()] = {
+                    'issuer': row[3].strip(),
+                    'target': row[4].strip(),
+                }
+    except Exception as e:
+        print(f"  ⚠ 주식코드 시트 로드 실패: {e}")
+        stock_map = {}
+
+    # 보유 종목에 주식코드 추가
+    for h in holdings:
+        codes = stock_map.get(h['isin'], {})
+        h['issuer_code'] = codes.get('issuer', '')
+        h['target_code'] = codes.get('target', '')
+
     print(f"  ✅ {len(holdings)}개 종목 로드")
     return holdings
 
@@ -295,23 +318,100 @@ def check_new_issuance(sent_nos: set):
     print(f"  → 신규 발행결정 {new_count}건 전송")
 
 # ============================================================
+# [네이버 금융 주가 조회]
+# ============================================================
+def get_naver_stock_price(stock_code: str) -> dict:
+    """
+    네이버 금융에서 현재가 + 전일 종가 조회
+    반환: {'current': 현재가, 'prev_close': 전일종가, 'change_pct': 등락률}
+    """
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=10)
+        r.encoding = 'euc-kr'
+        html = r.text
+
+        # 현재가
+        cur_m = re.search(r'<p class="no_today">.*?<span class="blind">([0-9,]+)</span>', html, re.DOTALL)
+        # 전일종가
+        prev_m = re.search(r'전일\s*<em[^>]*>([0-9,]+)</em>', html)
+        if not prev_m:
+            prev_m = re.search(r'<td class="first">.*?([0-9,]+).*?</td>', html, re.DOTALL)
+
+        if cur_m and prev_m:
+            current    = int(cur_m.group(1).replace(',', ''))
+            prev_close = int(prev_m.group(1).replace(',', ''))
+            change_pct = (current - prev_close) / prev_close * 100
+            return {'current': current, 'prev_close': prev_close, 'change_pct': round(change_pct, 2)}
+    except Exception as e:
+        print(f"    ⚠ 주가 조회 실패 ({stock_code}): {e}")
+    return {}
+
+# ============================================================
+# [알람4] 주가 5% 이상 변동 (KST 9시~15시 사이, 하루 1번)
+# ============================================================
+def check_stock_price(holdings, sent_nos: set):
+    # 장 시간(9시~15시30분) 외에는 스킵
+    if not (9 <= KST_H <= 15):
+        print(f"\n📈 [알람4] 주가 변동 스킵 (KST {KST_H}시, 장시간 외)")
+        return
+
+    print(f"\n📈 [알람4] 주가 5% 변동 체크...")
+
+    # 이미 오늘 알람 보낸 종목코드 세트
+    alerted_today = set(s for s in sent_nos if s.startswith('PRICE_'))
+
+    # 중복 제거: 같은 주식코드 1번만 조회
+    checked_codes = set()
+
+    for h in holdings:
+        for code_type, code in [('발행사', h.get('issuer_code', '')), ('교환대상', h.get('target_code', ''))]:
+            if not code or len(code) != 6:
+                continue
+            alert_key = f"PRICE_{code}_{TODAY}"
+            if alert_key in alerted_today or code in checked_codes:
+                continue
+            checked_codes.add(code)
+
+            price = get_naver_stock_price(code)
+            if not price:
+                continue
+
+            chg = price['change_pct']
+            print(f"  📊 {h['name']} ({code}): {price['current']:,}원 ({chg:+.2f}%)")
+
+            if abs(chg) >= PRICE_THRESHOLD:
+                direction = '📈' if chg > 0 else '📉'
+                msg = (
+                    f"{direction} <b>주가 급변동 알람</b>\n\n"
+                    f"🔹 <b>{h['name']}</b> ({h['bond_type']} {h['hosu']}회)\n"
+                    f"   🏷 {code_type} 주식 [{code}]\n"
+                    f"   💰 현재가: {price['current']:,}원\n"
+                    f"   📊 전일 대비: <b>{chg:+.2f}%</b>\n"
+                    f"   (전일 종가: {price['prev_close']:,}원)"
+                )
+                send_telegram(msg)
+                sent_nos.add(alert_key)
+                print(f"  {direction} {h['name']} ({code}): {chg:+.2f}% → 알람 전송")
+            time.sleep(0.5)
+
+# ============================================================
 # [실행]
 # ============================================================
 if __name__ == '__main__':
     print(f"🤖 수성 공시 알람 시작 (KST {TODAY} {KST_H}시)")
 
-    # 중복 방지: 오늘 보낸 공시번호 로드
     sent_nos = load_sent_nos()
     print(f"  📋 기존 전송 기록: {len(sent_nos)}건")
 
-    # 보유 종목 로드
     holdings = load_holdings()
 
     if holdings:
         check_new_disclosures(holdings, sent_nos)   # 알람1: 보유종목 공시
         check_put_call_deadline(holdings)            # 알람2: PUT/CALL 임박 (9시만)
         check_new_issuance(sent_nos)                 # 알람3: 신규 발행결정
+        check_stock_price(holdings, sent_nos)        # 알람4: 주가 5% 변동
 
-    # 보낸 공시번호 저장
     save_sent_nos(sent_nos)
     print(f"\n🏁 완료!")
