@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import requests
@@ -14,10 +15,10 @@ DART_KEY = (
     os.environ.get('DART_KEY') or
     'bfc4e4e445de4727ae0bcc27e80ba5cf0e3818e6'
 )
-SHEET_ID       = os.environ.get('SHEET_ID', '1s73BDNtCPe5mOs9EjBE5npEfcaNtYRyWJxRBUmJI-WA')
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT  = os.environ.get('TELEGRAM_CHAT_ID', '')
-DART_BASE      = "https://opendart.fss.or.kr/api"
+SHEET_ID        = os.environ.get('SHEET_ID', '1s73BDNtCPe5mOs9EjBE5npEfcaNtYRyWJxRBUmJI-WA')
+TELEGRAM_TOKEN  = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+TELEGRAM_CHAT   = os.environ.get('TELEGRAM_CHAT_ID', '')
+DART_BASE       = "https://opendart.fss.or.kr/api"
 
 NOW   = datetime.utcnow() + timedelta(hours=9)   # KST
 TODAY = NOW.strftime('%Y-%m-%d')
@@ -25,6 +26,9 @@ KST_H = NOW.hour
 
 # PUT/CALL 임박 알람 기준 (일)
 ALERT_DAYS = [30, 7, 1]
+
+# 주가 변동 알람 기준 (%)
+PRICE_THRESHOLD = 5.0
 
 # 중복 방지용 파일
 SENT_FILE = 'sent_rcept_nos.json'
@@ -36,7 +40,6 @@ def load_sent_nos() -> set:
     try:
         with open(SENT_FILE, 'r') as f:
             data = json.load(f)
-            # 오늘 날짜 것만 유지 (매일 자동 초기화)
             return set(data.get(TODAY, []))
     except Exception:
         return set()
@@ -48,7 +51,6 @@ def save_sent_nos(sent_nos: set):
     except Exception:
         data = {}
     data[TODAY] = list(sent_nos)
-    # 오늘 것만 유지 (오래된 날짜 제거)
     data = {k: v for k, v in data.items() if k == TODAY}
     with open(SENT_FILE, 'w') as f:
         json.dump(data, f)
@@ -117,7 +119,7 @@ def load_holdings():
     try:
         ws_stock = sh.worksheet('주식코드')
         stock_rows = ws_stock.get_all_values()
-        stock_map = {}   # isin → {'issuer': '002320', 'target': '002320'}
+        stock_map = {}
         for row in stock_rows[1:]:
             if len(row) >= 5 and row[1].strip():
                 stock_map[row[1].strip()] = {
@@ -128,7 +130,6 @@ def load_holdings():
         print(f"  ⚠ 주식코드 시트 로드 실패: {e}")
         stock_map = {}
 
-    # 보유 종목에 주식코드 추가
     for h in holdings:
         codes = stock_map.get(h['isin'], {})
         h['issuer_code'] = codes.get('issuer', '')
@@ -189,7 +190,7 @@ def check_new_disclosures(holdings, sent_nos: set):
             for item in (data.get('list') or []):
                 rcept_no = item.get('rcept_no', '')
                 if not rcept_no or rcept_no in sent_nos:
-                    continue   # 이미 보낸 공시 스킵
+                    continue
 
                 rpt  = item.get('report_nm', '')
                 link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
@@ -290,7 +291,7 @@ def check_new_issuance(sent_nos: set):
             if not any(kw in rpt for kw in issue_kws):
                 continue
             if not rcept_no or rcept_no in sent_nos:
-                continue   # 이미 보낸 공시 스킵
+                continue
 
             corp_name = item.get('corp_name', '')
             link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
@@ -321,10 +322,6 @@ def check_new_issuance(sent_nos: set):
 # [네이버 금융 주가 조회]
 # ============================================================
 def get_naver_stock_price(stock_code: str) -> dict:
-    """
-    네이버 금융에서 현재가 + 전일 종가 조회
-    반환: {'current': 현재가, 'prev_close': 전일종가, 'change_pct': 등락률}
-    """
     try:
         url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -332,16 +329,14 @@ def get_naver_stock_price(stock_code: str) -> dict:
         r.encoding = 'euc-kr'
         html = r.text
 
-        # 현재가
-        cur_m = re.search(r'<p class="no_today">.*?<span class="blind">([0-9,]+)</span>', html, re.DOTALL)
-        # 전일종가
+        cur_m  = re.search(r'<p class="no_today">.*?<span class="blind">([0-9,]+)</span>', html, re.DOTALL)
         prev_m = re.search(r'전일\s*<em[^>]*>([0-9,]+)</em>', html)
-        if not prev_m:
-            prev_m = re.search(r'<td class="first">.*?([0-9,]+).*?</td>', html, re.DOTALL)
 
         if cur_m and prev_m:
             current    = int(cur_m.group(1).replace(',', ''))
             prev_close = int(prev_m.group(1).replace(',', ''))
+            if prev_close == 0:
+                return {}
             change_pct = (current - prev_close) / prev_close * 100
             return {'current': current, 'prev_close': prev_close, 'change_pct': round(change_pct, 2)}
     except Exception as e:
@@ -349,20 +344,16 @@ def get_naver_stock_price(stock_code: str) -> dict:
     return {}
 
 # ============================================================
-# [알람4] 주가 5% 이상 변동 (KST 9시~15시 사이, 하루 1번)
+# [알람4] 주가 5% 이상 변동 (KST 9시~15시, 하루 1번)
 # ============================================================
 def check_stock_price(holdings, sent_nos: set):
-    # 장 시간(9시~15시30분) 외에는 스킵
     if not (9 <= KST_H <= 15):
         print(f"\n📈 [알람4] 주가 변동 스킵 (KST {KST_H}시, 장시간 외)")
         return
 
-    print(f"\n📈 [알람4] 주가 5% 변동 체크...")
+    print(f"\n📈 [알람4] 주가 5% 변동 체크 (기준: {PRICE_THRESHOLD}%)...")
 
-    # 이미 오늘 알람 보낸 종목코드 세트
     alerted_today = set(s for s in sent_nos if s.startswith('PRICE_'))
-
-    # 중복 제거: 같은 주식코드 1번만 조회
     checked_codes = set()
 
     for h in holdings:
@@ -408,10 +399,10 @@ if __name__ == '__main__':
     holdings = load_holdings()
 
     if holdings:
-        check_new_disclosures(holdings, sent_nos)   # 알람1: 보유종목 공시
-        check_put_call_deadline(holdings)            # 알람2: PUT/CALL 임박 (9시만)
-        check_new_issuance(sent_nos)                 # 알람3: 신규 발행결정
-        check_stock_price(holdings, sent_nos)        # 알람4: 주가 5% 변동
+        check_new_disclosures(holdings, sent_nos)
+        check_put_call_deadline(holdings)
+        check_new_issuance(sent_nos)
+        check_stock_price(holdings, sent_nos)
 
     save_sent_nos(sent_nos)
     print(f"\n🏁 완료!")
