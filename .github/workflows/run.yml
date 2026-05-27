@@ -22,10 +22,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python alert.py
-      - name: Save sent_rcept_nos.json
+      - name: Save state files
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add sent_rcept_nos.json || true
-          git diff --staged --quiet || git commit -m "Update sent_rcept_nos.json"
+          git add last_update_id.json || true
+          git diff --staged --quiet || git commit -m "Update state files"
           git push || true
