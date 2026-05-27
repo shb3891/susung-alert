@@ -83,6 +83,11 @@ def send_telegram(message: str):
 # [보유 종목 로드 - 구글 스프레드시트]
 # ============================================================
 def load_holdings():
+    """메인시트(시트1) + 주식코드매칭 시트를 함께 로드.
+    
+    - 메인시트: PUT/CALL 일정 (알람2용), 회차/종류 등 표시용
+    - 주식코드매칭 시트: 공시 검색용 corp_code, 공시대상 종목명 (알람1용)
+    """
     print("📋 보유 종목 로드 중...")
     creds_json = json.loads(os.environ.get('GCP_SERVICE_ACCOUNT_KEY'))
     scopes = [
@@ -92,6 +97,8 @@ def load_holdings():
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     gc    = gspread.authorize(creds)
     sh    = gc.open_by_key(SHEET_ID)
+
+    # === 1. 메인시트(시트1) 로드 ===
     ws    = sh.get_worksheet(0)
     all_values = ws.get_all_values()
 
@@ -115,7 +122,28 @@ def load_holdings():
             'call_end':   g(18),
         })
 
-    # 주식코드 시트 로드
+    # === 2. 주식코드매칭 시트 로드 (NEW) ===
+    match_map = {}  # ISIN → {corp_code, target_name, target_code, status}
+    try:
+        ws_match = sh.worksheet('주식코드매칭')
+        match_rows = ws_match.get_all_values()
+        # 컬럼: A=ISIN, B=채권명, C=종류, D=콜상태, E=발행사주식코드,
+        #       F=공시대상종목명, G=공시대상주식코드, H=DARTcorp_code,
+        #       I=매칭상태, J=매칭방법, K=최초등록일, L=최근검증일, M=메모
+        for row in match_rows[1:]:
+            if len(row) >= 8 and row[0].strip().startswith('KR'):
+                isin = row[0].strip()
+                match_map[isin] = {
+                    'corp_code':    row[7].strip(),   # H열
+                    'target_name':  row[5].strip(),   # F열
+                    'target_code':  row[6].strip(),   # G열
+                    'status':       row[8].strip() if len(row) > 8 else '',
+                }
+        print(f"  ✅ 주식코드매칭 시트: {len(match_map)}개 종목 로드")
+    except Exception as e:
+        print(f"  ⚠ 주식코드매칭 시트 로드 실패: {e}")
+
+    # === 3. 주식코드 시트 로드 (주가 알람용 - 기존 유지) ===
     try:
         ws_stock = sh.worksheet('주식코드')
         stock_rows = ws_stock.get_all_values()
@@ -130,47 +158,50 @@ def load_holdings():
         print(f"  ⚠ 주식코드 시트 로드 실패: {e}")
         stock_map = {}
 
+    # === 4. 매칭 정보 + 주식코드 정보를 holdings에 합치기 ===
     for h in holdings:
+        match = match_map.get(h['isin'], {})
+        h['corp_code']    = match.get('corp_code', '')
+        h['target_name']  = match.get('target_name', '')
+        h['target_code']  = match.get('target_code', '')
+        h['match_status'] = match.get('status', '')
+
+        # 기존 주식코드 시트는 주가 알람용으로 유지
         codes = stock_map.get(h['isin'], {})
         h['issuer_code'] = codes.get('issuer', '')
-        h['target_code'] = codes.get('target', '')
+        # target_code는 매칭시트의 G열 우선, 없으면 기존 주식코드 시트 사용
+        if not h['target_code']:
+            h['target_code'] = codes.get('target', '')
 
     print(f"  ✅ {len(holdings)}개 종목 로드")
+    
+    # 매칭 상태 통계
+    matched = sum(1 for h in holdings if h['corp_code'])
+    unmatched = len(holdings) - matched
+    print(f"  📊 매칭됨: {matched}개 / 매칭 안 됨: {unmatched}개")
+    if unmatched > 0:
+        print(f"     ⚠️ 매칭 안 된 종목은 공시 알람에서 제외됩니다.")
+    
     return holdings
 
 # ============================================================
-# [corp_code 조회]
-# ============================================================
-def get_corp_code(corp_name: str) -> str:
-    try:
-        r = requests.get(
-            f"{DART_BASE}/company.json",
-            params={'crtfc_key': DART_KEY, 'corp_name': corp_name},
-            timeout=10,
-        )
-        data = r.json()
-        if data.get('status') != '000':
-            return ''
-        items = data.get('list', [])
-        listed = [x for x in items if x.get('stock_code', '').strip()]
-        for item in (listed or items):
-            return item.get('corp_code', '')
-    except Exception:
-        pass
-    return ''
-
-# ============================================================
-# [알람1] 보유 종목 신규 공시 (매 5분, 중복 방지)
+# [알람1] 보유 종목 신규 공시 (매 10분, 중복 방지)
+# ★ 변경됨: 주식코드매칭 시트의 corp_code 직접 사용
 # ============================================================
 def check_new_disclosures(holdings, sent_nos: set):
     print(f"\n📢 [알람1] 보유 종목 신규 공시 체크...")
     new_count = 0
+    skipped = 0
 
     for h in holdings:
-        name = h['name']
-        corp_code = get_corp_code(name)
+        # ★ 매칭 시트의 corp_code 직접 사용 (DART API 추가 호출 불필요)
+        corp_code = h.get('corp_code', '')
         if not corp_code:
+            skipped += 1
             continue
+
+        bond_name   = h['name']  # 예: "어보브반도체 3EB"
+        target_name = h.get('target_name', '') or bond_name  # 공시 회사명
 
         try:
             r = requests.get(
@@ -195,27 +226,30 @@ def check_new_disclosures(holdings, sent_nos: set):
                 rpt  = item.get('report_nm', '')
                 link = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 
+                # ★ 새 알람 포맷: 채권명 + 공시 회사명 분리 표시
                 msg = (
                     f"📢 <b>보유종목 신규 공시</b>\n\n"
-                    f"🔹 <b>{name}</b> ({h['bond_type']} {h['hosu']}회)\n"
-                    f"   📄 {rpt}\n"
-                    f"   📅 {TODAY}\n"
-                    f"   🔗 <a href='{link}'>DART 바로가기</a>"
+                    f"🔹 <b>{bond_name}</b>\n"
+                    f"🏢 공시: {target_name}\n"
+                    f"📄 {rpt}\n"
+                    f"📅 {TODAY}\n"
+                    f"🔗 <a href='{link}'>DART 바로가기</a>"
                 )
                 send_telegram(msg)
                 sent_nos.add(rcept_no)
                 new_count += 1
-                print(f"  📄 {name}: {rpt}")
+                print(f"  📄 {bond_name} → {target_name}: {rpt}")
                 time.sleep(0.5)
 
         except Exception as e:
-            print(f"  ⚠ {name} 조회 실패: {e}")
+            print(f"  ⚠ {bond_name} 조회 실패: {e}")
         time.sleep(0.3)
 
-    print(f"  → 신규 공시 {new_count}건 전송")
+    print(f"  → 신규 공시 {new_count}건 전송 (매칭 안 된 {skipped}개 종목 스킵)")
 
 # ============================================================
 # [알람2] PUT/CALL 행사 임박 (KST 오전 9시에만 실행)
+# ※ 회차 오류 이슈는 풋콜스케줄 시트 도입 시 별도 수정 예정
 # ============================================================
 def check_put_call_deadline(holdings):
     if KST_H != 9:
