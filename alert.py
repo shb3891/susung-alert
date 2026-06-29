@@ -82,6 +82,7 @@ SHEET_STOCK_CODE = '주식코드'
 
 # ============================================================
 # [중복 방지: sent_rcept_nos.json]
+# - 오늘 날짜만 유지 (어제 이전 자동 정리)
 # ============================================================
 def load_sent_nos() -> set:
     """오늘 보낸 ID 로드 (날짜별 관리)"""
@@ -94,16 +95,18 @@ def load_sent_nos() -> set:
 
 
 def save_sent_nos(sent_nos: set):
+    """오늘 보낸 ID 저장 (오늘 날짜만 유지)"""
     try:
         with open(SENT_FILE, 'r') as f:
             data = json.load(f)
     except Exception:
         data = {}
     data[TODAY] = list(sent_nos)
-    # 오늘 것만 남기기 (예전 거 정리)
+    # 오늘 것만 남기기
     data = {k: v for k, v in data.items() if k == TODAY}
     with open(SENT_FILE, 'w') as f:
         json.dump(data, f)
+    print(f"  💾 sent_rcept_nos.json 저장: {len(sent_nos)}건")
 
 
 # ============================================================
@@ -778,8 +781,7 @@ if __name__ == '__main__':
     # === 저장 ===
     save_sent_nos(sent_nos)
     
-    # === 텔레그램 명령어 처리 ===
-    if TELEGRAM_TOKEN:
-        process_telegram_updates(sh, TELEGRAM_TOKEN)
+    # === 텔레그램 명령어 처리는 Cloudflare Worker가 담당 ===
+    # process_telegram_updates(sh, TELEGRAM_TOKEN)  ← 비활성화 (Worker 사용)
     
     print(f"\n🏁 완료!")
