@@ -21,6 +21,10 @@ on:
   
   workflow_dispatch:
 
+# 워크플로우 권한 (sent_rcept_nos.json 파일 push 가능하게)
+permissions:
+  contents: write
+
 concurrency:
   group: susung-alert
   cancel-in-progress: false
@@ -33,6 +37,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -58,11 +64,15 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
         run: python alert.py
       
-      - name: Save state files
+      - name: Commit and push state files
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add sent_rcept_nos.json || true
-          git add last_update_id.json || true
-          git diff --staged --quiet || git commit -m "chore: update state files"
-          git push || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sent_rcept_nos.json last_update_id.json 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "✅ 변경사항 없음 - commit 스킵"
+          else
+            git commit -m "chore: update state files [skip ci]"
+            git push
+            echo "✅ 상태 파일 push 성공"
+          fi
