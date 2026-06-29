@@ -928,7 +928,11 @@ def handle_portfolio_list(sh, args, chat_id, message_id, token):
     for i, (p, amt) in enumerate(holdings[:50], 1):
         ret = p.get('return', '')
         ret_str = f" ({fmt_pct(ret)})" if ret else ''
-        lines.append(f"{i}. {p['name']}: {amt:.0f}억{ret_str}")
+        # 회차+종류 표시 (예: "6CB", "1EB", "5BW")
+        hosu = p.get('hosu', '')
+        bt = p.get('bond_type', '')
+        suffix = f"{hosu}{bt}" if (hosu and bt) else (bt if bt else '')
+        lines.append(f"{i}. {p['name']}{suffix}: {amt:.0f}억{ret_str}")
     
     if len(holdings) > 50:
         lines.append(f"\n... 외 {len(holdings) - 50}개")
@@ -995,7 +999,10 @@ def handle_total(sh, args, chat_id, message_id, token):
     for p, amt in holdings[:5]:
         ret = p.get('return', '')
         ret_str = f" ({fmt_pct(ret)})" if ret else ''
-        lines.append(f"   • {p['name']}: {amt:.0f}억{ret_str}")
+        hosu = p.get('hosu', '')
+        bt = p.get('bond_type', '')
+        suffix = f"{hosu}{bt}" if (hosu and bt) else (bt if bt else '')
+        lines.append(f"   • {p['name']}{suffix}: {amt:.0f}억{ret_str}")
     
     send_reply(token, chat_id, '\n'.join(lines), reply_to=message_id)
 
