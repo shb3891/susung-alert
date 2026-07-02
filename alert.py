@@ -82,31 +82,50 @@ SHEET_STOCK_CODE = '주식코드'
 
 # ============================================================
 # [중복 방지: sent_rcept_nos.json]
-# - 오늘 날짜만 유지 (어제 이전 자동 정리)
+# - 최근 3일치 유지 (날짜 바뀌어도 어제 알림 안 옴)
+# - 3일 이전 기록은 자동 정리
 # ============================================================
+RETENTION_DAYS = 3  # 며칠치 유지할지 (오늘 + 어제 + 그저께)
+
+
 def load_sent_nos() -> set:
-    """오늘 보낸 ID 로드 (날짜별 관리)"""
+    """최근 N일치 보낸 ID 로드"""
     try:
         with open(SENT_FILE, 'r') as f:
             data = json.load(f)
-        return set(data.get(TODAY, []))
+        # 최근 N일 날짜 키들의 ID를 모두 합쳐서 반환
+        cutoff = (NOW - timedelta(days=RETENTION_DAYS)).strftime('%Y-%m-%d')
+        merged = set()
+        for date_str, ids in data.items():
+            if date_str >= cutoff:  # 문자열 비교 OK (YYYY-MM-DD 형식)
+                merged.update(ids)
+        return merged
     except Exception:
         return set()
 
 
 def save_sent_nos(sent_nos: set):
-    """오늘 보낸 ID 저장 (오늘 날짜만 유지)"""
+    """오늘 보낸 ID 저장 + 오래된 기록 자동 정리"""
     try:
         with open(SENT_FILE, 'r') as f:
             data = json.load(f)
     except Exception:
         data = {}
-    data[TODAY] = list(sent_nos)
-    # 오늘 것만 남기기
-    data = {k: v for k, v in data.items() if k == TODAY}
+    
+    # 오늘 날짜 키에 추가 (기존 + 신규 합집합)
+    existing_today = set(data.get(TODAY, []))
+    today_all = existing_today | sent_nos  # 합집합으로 누적
+    data[TODAY] = list(today_all)
+    
+    # 최근 N일치만 유지 (오래된 날짜 제거)
+    cutoff = (NOW - timedelta(days=RETENTION_DAYS)).strftime('%Y-%m-%d')
+    data = {k: v for k, v in data.items() if k >= cutoff}
+    
     with open(SENT_FILE, 'w') as f:
-        json.dump(data, f)
-    print(f"  💾 sent_rcept_nos.json 저장: {len(sent_nos)}건")
+        json.dump(data, f, ensure_ascii=False)
+    
+    total = sum(len(v) for v in data.values())
+    print(f"  💾 sent_rcept_nos.json 저장: 오늘 {len(today_all)}건 / 전체 {total}건 ({len(data)}일치)")
 
 
 # ============================================================
