@@ -788,8 +788,9 @@ if __name__ == '__main__':
         exit(0)
     
     # === 알람 실행 ===
-    # 알람1: 보유 종목 신규 공시 (매 실행)
-    check_new_disclosures(holdings, sent_nos)
+    # 알람1: 보유 종목 신규 공시 - Cloudflare Worker로 이전 (1분 실시간)
+    # check_new_disclosures(holdings, sent_nos)
+    print(f"\n📢 [알람1] 보유 공시 → Worker로 이전됨 (스킵)")
     
     # 알람2: 6종 이벤트 D-day (KST 09시만)
     check_event_alerts(schedule, holdings, sent_nos)
@@ -800,8 +801,9 @@ if __name__ == '__main__':
     # 알람4: 자본변동 (즉시 + 일일요약 09시)
     check_capital_actions(capital_actions, holdings, sent_nos)
     
-    # 알람5: 주가 변동 (장중만)
-    check_stock_price(holdings, sent_nos)
+    # 알람5: 주가 5% 변동 - Cloudflare Worker로 이전 (장중 3분 실시간)
+    # check_stock_price(holdings, sent_nos)
+    print(f"\n📈 [알람5] 주가 변동 → Worker로 이전됨 (스킵)")
     
     # === 저장 ===
     save_sent_nos(sent_nos)
