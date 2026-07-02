@@ -585,9 +585,15 @@ def check_capital_actions(capital_actions, holdings, sent_nos: set):
         print(f"  ℹ 자본변동 없음")
         return
     
-    # === 즉시 알림 ===
+    # === 즉시 알림 (오늘 감지된 것만) ===
+    # 어제 이전 감지된 자본변동은 이미 알림 나갔다고 가정
+    # (sent_nos에 없어도 재발송 안 함)
     immediate_count = 0
     for action in capital_actions:
+        # 감지일자가 오늘이 아니면 스킵
+        if action.get('detected_date', '') != TODAY:
+            continue
+        
         # 중복 방지 키 (link 기준)
         alert_key = f"CA_{action['link']}"
         if alert_key in sent_nos:
